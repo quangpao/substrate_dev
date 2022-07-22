@@ -17,7 +17,39 @@ mod benchmarking;
 use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
 use frame_support::inherent::Vec;
-use scale_info::prelude::*;
+use frame_support::traits::Randomness;
+// use frame_support::storage::bounded_vec;
+// use scale_info::prelude::*;
+use frame_support::traits::Currency;
+use frame_support::traits::UnixTime;
+// use frame_support::traits::StorageInstance;
+type BalanceOf<T> = <<T as Config>::KittyCurrency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
+// type CreateDate<T> = <<T as Config>::TimeProvider as UnixTime<<T as frame_system::Config>::BlockNumber>>::Timestamp;
+
+// impt<T: Config> Time for Pallet<T> {
+// 	type Moment = T::Moment;
+
+// 	fn now() -> Self::Moment {
+// 		Self::now()
+// 	}
+// }
+
+// impl<T: Config> UnixTime for Pallet<T> {
+// 	fn now() -> core::time::Duration {
+// 		let now = Self::now();
+// 		sp_std::if_std! {
+// 			if now 	== T::Moment::zero() {
+// 				log::error!(
+// 					target: "runtime::timestamp",
+// 					"`pallet-timestamp::UnixTime::now` is called at the genesis, invalid value returned: 0",
+// 				);
+// 			}
+// 		}
+// 		core::time::Duration::from_millis(now.saturated_into::<u64>())
+// 	}
+// }
+
+
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -30,8 +62,9 @@ pub mod pallet {
 		id: Id,
 		dna: Vec<u8>,
 		owner: T::AccountId,
-		price: u32,
+		price: BalanceOf<T>,
 		gender: Gender,
+		create_date: u64,
 	}
 	pub type Id = u32;
 
@@ -50,9 +83,15 @@ pub mod pallet {
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
+	pub trait Config: frame_system::Config{
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+		type KittyCurrency: Currency<Self::AccountId>;
+		type TimeProvider: UnixTime;
+		// type MyRandomness: Randomness<Self::Hash, Self::BlockNumber>;
+		#[pallet::constant]
+		type MaxAddend: Get<u32>;
+		// type ClearFrequency: Get<Self::BlockNumber>;
 	}
 
 	#[pallet::pallet]
@@ -68,6 +107,10 @@ pub mod pallet {
 	#[pallet::getter(fn kitty_number)]
 	pub type KittyNumber<T> = StorageValue<_, Id, ValueQuery>;
 
+	#[pallet::storage]
+	#[pallet::getter(fn nonce_number)]
+	pub type Nonce<T> = StorageValue<_, u32, ValueQuery>;
+
 
 
 	#[pallet::storage]
@@ -80,6 +123,8 @@ pub mod pallet {
 	pub(super) type KittyOwner<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, Vec<Kitties<T>>, OptionQuery>;
 
 	//
+	
+
 	//
 
 	//
@@ -91,6 +136,7 @@ pub mod pallet {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
 		KittyStore(Vec<u8>, u32),
+
 	}
 
 	// Errors inform users that something went wrong.
@@ -106,37 +152,48 @@ pub mod pallet {
 
 
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
-		pub fn create_kitty(origin: OriginFor<T>, dna: Vec<u8>, price: u32) -> DispatchResult {
+		pub fn create_kitty(origin: OriginFor<T>, dna: Vec<u8>) -> DispatchResultWithPostInfo {
 
 			let who = ensure_signed(origin)?;
-			let mut current_id = <KittyNumber<T>>::get() + 1;
+			
+			//Check if the kitties are full or not
+			let kitty_owner = <KittyOwner<T>>::get(who.clone());
+			let mut kitty_owner = match kitty_owner {
+				Some(k) => k,
+				None => Vec::new(),
+			};
+			ensure!(kitty_owner.len() < <T as Config>::MaxAddend::get().try_into().unwrap(), Error::<T>::StorageOverflow);
 
+			//check the total balance of who for debug
+			log::info!("total_balance: {:?}", T::KittyCurrency::total_balance(&who));
+
+			// let nonce = Self::get_and_increase_nonce();
+			// let (randomValue, _) = T::MyRandomness::random(&nonce);
+			// let dna = randomValue.as_ref().to_vec();
+
+			let current_id = <KittyNumber<T>>::get() + 1;
 			let gender = Self:: gen_gender(dna.clone()).unwrap();
+
+
 			let kitty = Kitties {
 				id: current_id,
 				dna: dna.clone(),
 				owner: who.clone(),
-				price: price,
+				price: 0u32.into(),
 				gender: gender,
-
+				create_date: T::TimeProvider::now().as_secs(),
 			};
-
-			let mut current_id = <KittyNumber<T>>::get() + 1;
 
 			<Kitty<T>>::insert(current_id, kitty);
 			<KittyNumber<T>>::put(current_id);
 
-			let kitty_owner = <KittyOwner<T>>::get(who.clone());
-			let mut kitty_owner = match kitty_owner {
-				Some(mut k) => k,
-				None => Vec::new(),
-			};
+
 			let kitty = <Kitty<T>>::get(current_id);
 			kitty_owner.push(kitty.unwrap());
 			<KittyOwner<T>>::insert(who.clone(), kitty_owner);
-			Self::deposit_event(Event::KittyStore(dna, price));
+			Self::deposit_event(Event::KittyStore(dna, 0u32.into()));
 
-			Ok(())
+			Ok(().into())
 
 
 		}
@@ -148,9 +205,9 @@ pub mod pallet {
 			ensure!(kitty.is_some(), "This kitty does not exist");
 			let mut kitty = kitty.unwrap();
 			ensure!(kitty.owner == sender, "You do not own this kitty");
-			let mut kitty_owner = <KittyOwner<T>>::get(sender.clone());
+			let kitty_owner = <KittyOwner<T>>::get(sender.clone());
 			let mut kitty_owner = match kitty_owner{
-				Some(mut k) => k,
+				Some(k) => k,
 				None => Vec::new(),
 			};
 
@@ -158,11 +215,12 @@ pub mod pallet {
 			kitty_owner.retain(|k| k.id != kitty.id.clone());
 			kitty.owner = new_owner.clone();
 			<KittyOwner<T>>::insert(sender.clone(), kitty_owner);
-			let mut kitty_owner = <KittyOwner<T>>::get(new_owner.clone());
+			let kitty_owner = <KittyOwner<T>>::get(new_owner.clone());
 			let mut kitty_owner = match kitty_owner{
-				Some(mut k) => k,
+				Some(k) => k,
 				None => Vec::new(),
 			};
+			ensure!(kitty_owner.len() < <T as Config>::MaxAddend::get().try_into().unwrap(), Error::<T>::StorageOverflow);
 			kitty_owner.push(kitty);
 			<KittyOwner<T>>::insert(new_owner.clone(), kitty_owner);
 			Ok(())
@@ -187,4 +245,11 @@ impl<T> Pallet<T> {
 		}
 		Ok(res)
 	}
+
+	// fn get_and_increase_nonce() -> Vec<u8> {
+	// 	let nonce = Nonce::<T>::get();
+	// 	Nonce::<T>::put(nonce + 1);
+	// 	nonce.encode()
+	// }
 }
+
